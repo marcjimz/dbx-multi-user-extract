@@ -114,25 +114,144 @@ class ServerlessJobManager:
             print(f"❌ Error creating job: {e}")
             raise
     
-    def grant_permission(self, job_id: int, sp_application_id: str, permission: str) -> Dict[str, Any]:
-        """Grant permissions on a job to a service principal"""
+    def run_job_now(self, job_id: int) -> Dict[str, Any]:
+        """Trigger a job to run immediately"""
         
         payload = {
-            "access_control_list": [
-                {
-                    "service_principal_name": sp_application_id,
-                    "permission_level": permission
-                }
-            ]
+            "job_id": job_id
         }
         
         try:
-            response = requests.patch(
-                f"{self.workspace_url}/api/2.0/permissions/jobs/{job_id}",
+            response = requests.post(
+                f"{self.workspace_url}/api/2.1/jobs/run-now",
                 headers=self.headers,
                 json=payload
             )
-            return response.json()
+            
+            if response.status_code not in [200, 201]:
+                print(f"❌ Failed to trigger job {job_id}: HTTP {response.status_code}")
+                print(f"   Response: {response.text}")
+                return None
+            
+            run_data = response.json()
+            return run_data
+            
         except Exception as e:
-            print(f"Error granting permission: {e}")
+            print(f"❌ Error triggering job {job_id}: {e}")
             return None
+    
+    def get_run_status(self, run_id: int) -> Dict[str, Any]:
+        """Get the status of a job run"""
+        
+        try:
+            response = requests.get(
+                f"{self.workspace_url}/api/2.1/jobs/runs/get?run_id={run_id}",
+                headers=self.headers
+            )
+            
+            if response.status_code != 200:
+                return None
+            
+            return response.json()
+            
+        except Exception as e:
+            print(f"Error getting run status: {e}")
+            return None
+    
+    def get_task_run_output(self, run_id: int, task_key: str = "process_data") -> Dict[str, Any]:
+        """Get the output of a specific task within a job run"""
+        
+        try:
+            # For multi-task jobs, we need to get the task run output, not the job run output
+            response = requests.get(
+                f"{self.workspace_url}/api/2.1/jobs/runs/get",
+                headers=self.headers,
+                params={"run_id": run_id}
+            )
+            
+            if response.status_code != 200:
+                print(f"   Failed to get run details - HTTP {response.status_code}")
+                return None
+            
+            run_data = response.json()
+            
+            # Find the task run
+            tasks = run_data.get('tasks', [])
+            for task in tasks:
+                if task.get('task_key') == task_key:
+                    # Get the task run ID
+                    task_run_id = task.get('run_id')
+                    if task_run_id:
+                        # Now get the output for this specific task
+                        output_response = requests.get(
+                            f"{self.workspace_url}/api/2.1/jobs/runs/get-output",
+                            headers=self.headers,
+                            params={"run_id": task_run_id}
+                        )
+                        
+                        if output_response.status_code == 200:
+                            return output_response.json()
+                        else:
+                            print(f"   Failed to get task output - HTTP {output_response.status_code}")
+                            if output_response.status_code == 400:
+                                print(f"   Response: {output_response.text[:200]}")
+            
+            return None
+            
+        except Exception as e:
+            print(f"   Error getting task output: {e}")
+            return None
+    
+    def get_run_output(self, run_id: int) -> Dict[str, Any]:
+        """Get the output of a completed job run (handles both single and multi-task jobs)"""
+        
+        try:
+            # First try to get output directly (works for single-task jobs)
+            response = requests.get(
+                f"{self.workspace_url}/api/2.1/jobs/runs/get-output?run_id={run_id}",
+                headers=self.headers
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 400:
+                # Check if it's a multi-task error
+                error_response = response.json()
+                if "multiple tasks" in error_response.get('message', '').lower():
+                    # Try to get the task output instead
+                    print(f"   Multi-task job detected, getting task output...")
+                    return self.get_task_run_output(run_id, "process_data")
+                else:
+                    print(f"   Failed to get output - HTTP {response.status_code}")
+                    print(f"   Response: {response.text[:200]}")
+            
+            return None
+            
+        except Exception as e:
+            print(f"   Error getting run output: {e}")
+            return None
+    
+    def wait_for_run_completion(self, run_id: int, max_wait_seconds: int = 300, poll_interval: int = 10) -> str:
+        """Wait for a job run to complete and return final status"""
+        
+        import time
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait_seconds:
+            status_response = self.get_run_status(run_id)
+            
+            if status_response:
+                life_cycle_state = status_response.get('state', {}).get('life_cycle_state', 'UNKNOWN')
+                result_state = status_response.get('state', {}).get('result_state', '')
+                
+                # Terminal states
+                if life_cycle_state in ['TERMINATED', 'SKIPPED', 'INTERNAL_ERROR']:
+                    return result_state if result_state else life_cycle_state
+                
+                # Still running
+                print(f"   Status: {life_cycle_state}", end='\r')
+            
+            time.sleep(poll_interval)
+        
+        return 'TIMEOUT'
+
