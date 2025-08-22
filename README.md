@@ -138,7 +138,6 @@ dbx-multi-user-extract/
 3. **Monitoring**
    - Jobs show clear attribution (created by X, runs as Y)
    - Audit logs capture all access with service principal identity
-   - Failed permission attempts logged for security review
 
 ## Production Considerations
 
